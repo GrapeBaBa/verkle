@@ -1,5 +1,8 @@
-use crate::trie::VerkleError::NotSupportedNodeType;
+use crate::trie::VerkleError::{NotSupportedNodeType, SerializedPayloadTooShort};
+use ark_ff::fields::PrimeField;
 use banderwagon::{Element, Fr};
+use num_traits::identities::One;
+use num_traits::identities::Zero;
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -12,6 +15,48 @@ pub type Key = [u8; 32];
 pub type Value = [u8; 32];
 
 const NODE_WIDTH: usize = 256;
+const MASK: [u8; 8] = [0x80, 0x40, 0x20, 0x10, 0x8, 0x4, 0x2, 0x1];
+
+fn bit(bit_list: &[u8], nr: usize) -> bool {
+    if bit_list.len() * 8 <= nr {
+        return false;
+    }
+
+    bit_list[nr / 8] & MASK[nr % 8] != 0
+}
+
+fn set_bit(bit_list: &mut [u8], index: usize) {
+    bit_list[index / 8] |= MASK[index % 8]
+}
+
+fn leaf_to_comms(poly: &mut [Fr], val: &[u8]) {
+    if val.len() == 0 {
+        return;
+    }
+
+    if val.len() > 32 {
+        panic!("invalid leaf length {}, {:?}", val.len(), val)
+    }
+
+    let mut val_lo_with_maker = [0u8; 17];
+    let mut lo_end = 16;
+    if val.len() < lo_end {
+        lo_end = val.len();
+    }
+
+    val_lo_with_maker[..lo_end].copy_from_slice(&val[..lo_end]);
+    val_lo_with_maker[16] = 1;
+    poly[0] = from_le_bytes(&val_lo_with_maker);
+    if val.len() >= 16 {
+        poly[1] = from_le_bytes(&val[16..]);
+    }
+}
+
+fn from_le_bytes(data: &[u8]) -> Fr {
+    let mut aligned = [0u8; 32];
+    aligned[..data.len()].copy_from_slice(data);
+    Fr::from_le_bytes_mod_order(&aligned)
+}
 
 #[derive(Error, Debug)]
 pub enum VerkleError {
@@ -23,7 +68,13 @@ pub enum VerkleError {
 
     #[error("not supported node type")]
     NotSupportedNodeType,
+
+    #[error("verkle payload is too short")]
+    SerializedPayloadTooShort,
 }
+
+const LEAF_FLAG: u8 = 1;
+const INTERNAL_FLAG: u8 = 2;
 
 pub type VerkleResult<T> = Result<T, VerkleError>;
 
@@ -31,14 +82,18 @@ pub trait Committer {
     fn commit_to_poly(&self, evaluations: &[Fr]) -> Element;
 }
 
+pub trait Deserializer {}
+
 pub trait VerkleTrie {
     fn put(&mut self, key: Key, value: Value) -> VerkleResult<()>;
 
     fn get(&self, key: Key) -> VerkleResult<Option<Value>>;
 
-    fn compute_commitment(&self) -> Element;
+    fn compute_commitment(&self, committer: &dyn Committer) -> Element;
 
     fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    fn serialize(&self) -> VerkleResult<Vec<u8>>;
 }
 
 pub struct LeafNode {
@@ -63,12 +118,37 @@ impl VerkleTrie for InternalNode {
         todo!()
     }
 
-    fn compute_commitment(&self) -> Element {
+    fn compute_commitment(&self, committer: &dyn Committer) -> Element {
         todo!()
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn serialize(&self) -> VerkleResult<Vec<u8>> {
+        // let mut bitlist = [0u8; 32];
+        // let mut children = Vec::with_capacity(NODE_WIDTH * 32);
+        // self.children.iter().enumerate().for_each(|(i, c)| {
+        //     if c.is_some() {
+        //         set_bit(&bitlist, i);
+        //     }
+        // })
+        // children: = make([]byte, 0, NodeWidth * 32)
+        // for i, c: = range
+        // n.children
+        // {
+        //     if _, ok: = c.(Empty);
+        //     !ok {
+        //         setBit(bitlist[: ],
+        //         i)
+        //         digits: = c.ComputeCommitment().Bytes()
+        //         children = append(children,
+        //         digits[: ]...)
+        //     }
+        // }
+        // return append(append([]byte { internalRLPType }, bitlist[: ]...), children...);, nil
+        todo!()
     }
 }
 
@@ -160,6 +240,19 @@ impl InternalNode {
             },
         }
     }
+
+    pub fn deserialize(serialized: &[u8], depth: u8) -> VerkleResult<NonNull<dyn VerkleTrie>> {
+        // if serialized.len() < 64 {
+        //     return Err(SerializedPayloadTooShort);
+        // }
+        //
+        // match serialized[0] {
+        //     INTERNAL_FLAG => {}
+        //     LEAF_FLAG => {}
+        //     _ => {}
+        // }
+        Err(SerializedPayloadTooShort)
+    }
 }
 
 impl VerkleTrie for LeafNode {
@@ -171,12 +264,20 @@ impl VerkleTrie for LeafNode {
         todo!()
     }
 
-    fn compute_commitment(&self) -> Element {
+    fn compute_commitment(&self, committer: &dyn Committer) -> Element {
+        // let mut count = 0;
+        // let mut poly: [Fr; 256] = [Fr::zero(); 256];
+        // poly[0] = Fr::one();
+        // poly[1] = Fr::from_le_bytes_mod_order(&self.stem);
         todo!()
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn serialize(&self) -> VerkleResult<Vec<u8>> {
+        todo!()
     }
 }
 
@@ -192,11 +293,17 @@ impl LeafNode {
         self.values[key[31] as usize] = Some(value);
         Ok(())
     }
+
+    pub fn deserialize(serialized: &[u8], depth: u8) -> VerkleResult<NonNull<dyn VerkleTrie>> {
+        todo!()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::trie::{InternalNode, Key, LeafNode, Value, NODE_WIDTH};
+    use banderwagon::Fr;
+    use num_traits::{One, Zero};
+    use crate::trie::{InternalNode, Key, LeafNode, Value, NODE_WIDTH, leaf_to_comms};
 
     #[test]
     fn test_set_child() {
@@ -224,5 +331,78 @@ mod tests {
             .downcast_mut::<LeafNode>()
             .unwrap();
         assert_eq!(value1, leaf_node.values[0].unwrap());
+    }
+
+    #[test]
+    fn test_leaf_to_comms_less_than_16() {
+        let value = [0u8; 4];
+        let mut p = [Fr::zero(); 2];
+        leaf_to_comms(&mut p, &value);
+        assert_eq!(3195623856215021945, p[0].0.0[0]);
+        assert_eq!(6342950750355062753, p[0].0.0[1]);
+        assert_eq!(18424290587888592554, p[0].0.0[2]);
+        assert_eq!(1249884543737537366, p[0].0.0[3]);
+
+        let value = [0u8; 15];
+        let mut p = [Fr::zero(); 2];
+        leaf_to_comms(&mut p, &value);
+        assert_eq!(3195623856215021945, p[0].0.0[0]);
+        assert_eq!(6342950750355062753, p[0].0.0[1]);
+        assert_eq!(18424290587888592554, p[0].0.0[2]);
+        assert_eq!(1249884543737537366, p[0].0.0[3]);
+    }
+
+    #[test]
+    fn test_leaf_to_comms_less_than_32() {
+        let value = [0u8; 16];
+        let mut p = [Fr::zero(); 2];
+        leaf_to_comms(&mut p, &value);
+        assert_eq!(3195623856215021945, p[0].0.0[0]);
+        assert_eq!(6342950750355062753, p[0].0.0[1]);
+        assert_eq!(18424290587888592554, p[0].0.0[2]);
+        assert_eq!(1249884543737537366, p[0].0.0[3]);
+
+        assert_eq!(0, p[1].0.0[0]);
+        assert_eq!(0, p[1].0.0[1]);
+        assert_eq!(0, p[1].0.0[2]);
+        assert_eq!(0, p[1].0.0[3]);
+
+        let mut value1 = [0u8; 20];
+        value1[17] = 1;
+        value1[19] = 1;
+        let mut p1 = [Fr::zero(); 2];
+        leaf_to_comms(&mut p1, &value1);
+        assert_eq!(3195623856215021945, p1[0].0.0[0]);
+        assert_eq!(6342950750355062753, p1[0].0.0[1]);
+        assert_eq!(18424290587888592554, p1[0].0.0[2]);
+        assert_eq!(1249884543737537366, p1[0].0.0[3]);
+
+        assert_eq!(6449575405170448856, p1[1].0.0[0]);
+        assert_eq!(12539258271468081731, p1[1].0.0[1]);
+        assert_eq!(4858174950920037973, p1[1].0.0[2]);
+        assert_eq!(2041956332529055221, p1[1].0.0[3]);
+
+        let mut value2 = [0u8; 32];
+        value2[17] = 1;
+        value2[19] = 1;
+        let mut p2 = [Fr::zero(); 2];
+        leaf_to_comms(&mut p2, &value2);
+        assert_eq!(3195623856215021945, p2[0].0.0[0]);
+        assert_eq!(6342950750355062753, p2[0].0.0[1]);
+        assert_eq!(18424290587888592554, p2[0].0.0[2]);
+        assert_eq!(1249884543737537366, p2[0].0.0[3]);
+
+        assert_eq!(6449575405170448856, p2[1].0.0[0]);
+        assert_eq!(12539258271468081731, p2[1].0.0[1]);
+        assert_eq!(4858174950920037973, p2[1].0.0[2]);
+        assert_eq!(2041956332529055221, p2[1].0.0[3]);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid leaf length 33, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]")]
+    fn test_leaf_to_comms_more_than_32() {
+        let value = [0u8; 33];
+        let mut p = [Fr::zero(); 2];
+        leaf_to_comms(&mut p, &value);
     }
 }
