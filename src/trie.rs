@@ -4,11 +4,8 @@ use banderwagon::{Element, Fr};
 use num_traits::identities::One;
 use num_traits::identities::Zero;
 use std::any::Any;
-use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::mem::MaybeUninit;
 use std::ptr::NonNull;
-use std::rc::Rc;
+use ark_ff::BigInteger;
 use thiserror::Error;
 
 pub type Key = [u8; 32];
@@ -27,6 +24,22 @@ fn bit(bit_list: &[u8], nr: usize) -> bool {
 
 fn set_bit(bit_list: &mut [u8], index: usize) {
     bit_list[index / 8] |= MASK[index % 8]
+}
+
+fn fill_suffix_tree_poly(poly: &mut [Fr], val: &[Option<[u8; 32]>]) -> usize {
+    let mut count = 0;
+    val.into_iter().enumerate().for_each(|(i, v)| {
+        if let Some(value) = v {
+            count += 1;
+            leaf_to_comms(&mut poly[((i << 1) & 0xFF) as usize..], value);
+        }
+    });
+
+    count
+}
+
+fn to_fr(p: &Element) -> Fr {
+    Fr::from_le_bytes_mod_order(p.map_to_field().0.to_bytes_le().as_slice())
 }
 
 fn leaf_to_comms(poly: &mut [Fr], val: &[u8]) {
@@ -79,7 +92,7 @@ const INTERNAL_FLAG: u8 = 2;
 pub type VerkleResult<T> = Result<T, VerkleError>;
 
 pub trait Committer {
-    fn commit_to_poly(&self, evaluations: &[Fr]) -> Element;
+    fn commit_to_poly(&self, evaluations: &[Fr], count: usize) -> Element;
 }
 
 pub trait Deserializer {}
@@ -89,7 +102,7 @@ pub trait VerkleTrie {
 
     fn get(&self, key: Key) -> VerkleResult<Option<Value>>;
 
-    fn compute_commitment(&self, committer: &dyn Committer) -> Element;
+    fn compute_commitment(&mut self, committer: &dyn Committer) -> Element;
 
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
@@ -118,7 +131,7 @@ impl VerkleTrie for InternalNode {
         todo!()
     }
 
-    fn compute_commitment(&self, committer: &dyn Committer) -> Element {
+    fn compute_commitment(&mut self, committer: &dyn Committer) -> Element {
         todo!()
     }
 
@@ -264,12 +277,25 @@ impl VerkleTrie for LeafNode {
         todo!()
     }
 
-    fn compute_commitment(&self, committer: &dyn Committer) -> Element {
-        // let mut count = 0;
-        // let mut poly: [Fr; 256] = [Fr::zero(); 256];
-        // poly[0] = Fr::one();
-        // poly[1] = Fr::from_le_bytes_mod_order(&self.stem);
-        todo!()
+    fn compute_commitment(&mut self, committer: &dyn Committer) -> Element {
+        let mut count;
+        let mut poly: [Fr; 256] = [Fr::zero(); 256];
+        poly[0] = Fr::one();
+        poly[1] = Fr::from_le_bytes_mod_order(&self.stem);
+
+        let mut c1_poly: [Fr; 256] = [Fr::zero(); 256];
+        count = fill_suffix_tree_poly(&mut c1_poly, &self.values[..128]);
+        let c1 = committer.commit_to_poly(&c1_poly, 256 - count);
+        poly[2] = to_fr(&c1);
+        self.c1 = Some(c1);
+
+        let mut c2_poly: [Fr; 256] = [Fr::zero(); 256];
+        count = fill_suffix_tree_poly(&mut c2_poly, &self.values[128..]);
+        let c2 = committer.commit_to_poly(&c2_poly, 256 - count);
+        poly[3] = to_fr(&c2);
+        self.c1 = Some(c2);
+
+        committer.commit_to_poly(&poly, 252)
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
@@ -301,9 +327,16 @@ impl LeafNode {
 
 #[cfg(test)]
 mod tests {
-    use banderwagon::Fr;
+    use std::fs::File;
+    use std::ops::Deref;
+    use std::sync::{Arc, LazyLock, Mutex};
+    use banderwagon::{Element, Fr};
     use num_traits::{One, Zero};
-    use crate::trie::{InternalNode, Key, LeafNode, Value, NODE_WIDTH, leaf_to_comms};
+    use crate::precompute::{CRS, PrecomputeLagrange};
+    use crate::trie::{InternalNode, Key, LeafNode, Value, NODE_WIDTH, leaf_to_comms, VerkleTrie};
+    use crate::trie::Committer;
+
+    static COMMITTER: LazyLock<PrecomputeLagrange> = LazyLock::new(|| PrecomputeLagrange::precompute(&CRS.G));
 
     #[test]
     fn test_set_child() {
@@ -404,5 +437,27 @@ mod tests {
         let value = [0u8; 33];
         let mut p = [Fr::zero(); 2];
         leaf_to_comms(&mut p, &value);
+    }
+
+    #[test]
+    fn test_leaf_node_commitment() {
+        use ark_serialize::CanonicalSerialize;
+        let serialized = [0u8; 32];
+        let mut values: [Option<[u8; 32]>; NODE_WIDTH] = [None; NODE_WIDTH];
+        values[1] = Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]);
+        let mut leaf_node = LeafNode {
+            stem: serialized[..31].try_into().unwrap(),
+            values,
+            c1: None,
+            c2: None,
+            depth: 1,
+        };
+
+        // let mut file = File::create("precomp1").unwrap();
+        let committer1 = PrecomputeLagrange::precompute(&CRS.G);
+        // committer1.serialize_unchecked(&mut file).unwrap();
+
+        let a = leaf_node.compute_commitment(&committer1);
+        println!("{:?}", a);
     }
 }
