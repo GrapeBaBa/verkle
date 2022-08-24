@@ -106,10 +106,16 @@ pub trait VerkleTrie {
 
     fn as_any_mut(&mut self) -> &mut dyn Any;
 
-    fn serialize(&self) -> VerkleResult<Vec<u8>>;
+    fn serialize(&self, committer: &dyn Committer) -> VerkleResult<Vec<u8>>;
+}
+
+pub struct NodeHeader {
+    commitment: Option<Element>,
+    hash_commitment: Option<Fr>,
 }
 
 pub struct LeafNode {
+    header: NodeHeader,
     stem: [u8; 31],
     values: [Option<[u8; 32]>; NODE_WIDTH],
     c1: Option<Element>,
@@ -119,6 +125,7 @@ pub struct LeafNode {
 
 pub struct InternalNode {
     children: [Option<NonNull<dyn VerkleTrie>>; NODE_WIDTH],
+    header: NodeHeader,
     depth: u8,
 }
 
@@ -139,29 +146,25 @@ impl VerkleTrie for InternalNode {
         self
     }
 
-    fn serialize(&self) -> VerkleResult<Vec<u8>> {
-        // let mut bitlist = [0u8; 32];
-        // let mut children = Vec::with_capacity(NODE_WIDTH * 32);
-        // self.children.iter().enumerate().for_each(|(i, c)| {
-        //     if c.is_some() {
-        //         set_bit(&bitlist, i);
-        //     }
-        // })
-        // children: = make([]byte, 0, NodeWidth * 32)
-        // for i, c: = range
-        // n.children
-        // {
-        //     if _, ok: = c.(Empty);
-        //     !ok {
-        //         setBit(bitlist[: ],
-        //         i)
-        //         digits: = c.ComputeCommitment().Bytes()
-        //         children = append(children,
-        //         digits[: ]...)
-        //     }
-        // }
-        // return append(append([]byte { internalRLPType }, bitlist[: ]...), children...);, nil
-        todo!()
+    fn serialize(&self, committer: &dyn Committer) -> VerkleResult<Vec<u8>> {
+        let mut bitlist = [0u8; 32];
+        let mut children = Vec::with_capacity(NODE_WIDTH * 32);
+        self.children.iter().enumerate().for_each(|(i, c)| {
+            unsafe {
+                if c.is_some() {
+                    set_bit(&mut bitlist, i);
+                    let digits = c.unwrap().as_mut().compute_commitment(committer).to_bytes();
+                    children.extend_from_slice(&digits);
+                }
+            }
+        });
+
+        let mut res = Vec::new();
+        res.push(INTERNAL_FLAG);
+        res.extend_from_slice(&bitlist);
+        res.extend(children);
+
+        Ok(res)
     }
 }
 
@@ -174,6 +177,7 @@ impl InternalNode {
     pub fn new(depth: u8) -> Self {
         Self {
             children: [None; NODE_WIDTH],
+            header: NodeHeader { commitment: None, hash_commitment: None },
             depth,
         }
     }
@@ -201,6 +205,7 @@ impl InternalNode {
         match child {
             None => {
                 let mut leaf_node = LeafNode {
+                    header: NodeHeader { commitment: None, hash_commitment: None },
                     stem: key[..31].try_into().unwrap(),
                     values: [None; NODE_WIDTH],
                     c1: None,
@@ -227,6 +232,7 @@ impl InternalNode {
                         let next_char_in_inserted_key = key[(self.depth + 1) as usize];
                         if next_char_in_current_leaf != next_char_in_inserted_key {
                             let mut new_leaf_node = LeafNode {
+                                header: NodeHeader { commitment: None, hash_commitment: None },
                                 stem: key[..31].try_into().unwrap(),
                                 values: [None; NODE_WIDTH],
                                 c1: None,
@@ -302,8 +308,25 @@ impl VerkleTrie for LeafNode {
         self
     }
 
-    fn serialize(&self) -> VerkleResult<Vec<u8>> {
-        todo!()
+    fn serialize(&self, committer: &dyn Committer) -> VerkleResult<Vec<u8>> {
+        let mut bitlist = [0u8; 32];
+        let mut children = Vec::with_capacity(NODE_WIDTH * 32);
+        self.values.iter().enumerate().for_each(|(i, v)| {
+            unsafe {
+                if v.is_some() {
+                    set_bit(&mut bitlist, i);
+                    children.extend_from_slice(&v.unwrap());
+                }
+            }
+        });
+
+        let mut res = Vec::new();
+        res.push(LEAF_FLAG);
+        res.extend_from_slice(&self.stem);
+        res.extend_from_slice(&bitlist);
+        res.extend(children);
+
+        Ok(res)
     }
 }
 
@@ -333,7 +356,7 @@ mod tests {
     use banderwagon::{Element, Fr};
     use num_traits::{One, Zero};
     use crate::precompute::{CRS, PrecomputeLagrange};
-    use crate::trie::{InternalNode, Key, LeafNode, Value, NODE_WIDTH, leaf_to_comms, VerkleTrie};
+    use crate::trie::{InternalNode, Key, LeafNode, Value, NODE_WIDTH, leaf_to_comms, VerkleTrie, NodeHeader};
     use crate::trie::Committer;
 
     static COMMITTER: LazyLock<PrecomputeLagrange> = LazyLock::new(|| PrecomputeLagrange::precompute(&CRS.G));
@@ -342,7 +365,7 @@ mod tests {
     fn test_set_child() {
         let mut internal_node = InternalNode::new(1);
         let res = internal_node.set_child(NODE_WIDTH - 1, None);
-        let msg = format!("{}", res.unwrap_err());
+        let msg = format!("{:}", res.unwrap_err());
         assert_eq!(
             "child index 255 higher than node width (expected < 255)",
             msg
@@ -446,6 +469,7 @@ mod tests {
         let mut values: [Option<[u8; 32]>; NODE_WIDTH] = [None; NODE_WIDTH];
         values[1] = Some([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]);
         let mut leaf_node = LeafNode {
+            header: NodeHeader { commitment: None, hash_commitment: None },
             stem: serialized[..31].try_into().unwrap(),
             values,
             c1: None,
